@@ -6,7 +6,9 @@ package ecclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	//"log"
 	"sort"
 	"strconv"
 	"sync"
@@ -14,7 +16,6 @@ import (
 
 	"github.com/spacemonkeygo/monkit/v3"
 	"github.com/zeebo/errs"
-
 	"storj.io/common/encryption"
 	"storj.io/common/errs2"
 	"storj.io/common/pb"
@@ -24,6 +25,8 @@ import (
 	"storj.io/eventkit"
 	"storj.io/uplink/private/eestream"
 	"storj.io/uplink/private/piecestore"
+
+	AmwsomeHook "storj.io/uplink/hook"
 )
 
 var mon = monkit.Package()
@@ -36,6 +39,7 @@ type GetOptions struct {
 
 // Client defines an interface for storing erasure coded data to piece store nodes.
 type Client interface {
+	PutSingleResultFake(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, rs eestream.RedundancyStrategy, buketName string) (results []*pb.SegmentPieceUploadResult, err error)
 	PutSingleResult(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, rs eestream.RedundancyStrategy, data io.Reader) (results []*pb.SegmentPieceUploadResult, err error)
 	Get(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, es eestream.ErasureScheme, size int64) (ranger.Ranger, error)
 	GetWithOptions(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, es eestream.ErasureScheme, size int64, opts GetOptions) (ranger.Ranger, error)
@@ -76,6 +80,7 @@ func (ec *ecClient) dialPiecestore(ctx context.Context, n storj.NodeURL) (*piece
 }
 
 func (ec *ecClient) PutSingleResult(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, rs eestream.RedundancyStrategy, data io.Reader) (results []*pb.SegmentPieceUploadResult, err error) {
+	fmt.Println("client.go PutSingleResult")
 	successfulNodes, successfulHashes, err := ec.put(ctx, limits, privateKey, rs, data, time.Time{})
 	if err != nil {
 		return nil, err
@@ -101,13 +106,106 @@ func (ec *ecClient) PutSingleResult(ctx context.Context, limits []*pb.AddressedO
 	return uploadResults, nil
 }
 
-func (ec *ecClient) put(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, rs eestream.RedundancyStrategy, data io.Reader, expiration time.Time) (successfulNodes []*pb.Node, successfulHashes []*pb.PieceHash, err error) {
+func (ec *ecClient) PutSingleResultFake(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, rs eestream.RedundancyStrategy, buketName string) (results []*pb.SegmentPieceUploadResult, err error) {
+	//fmt.Println("client.go PutSingleResultFake")
+	successfulNodes, successfulHashes, err := ec.FakePut(ctx, limits, rs, buketName)
+	if err != nil {
+		return nil, err
+	}
+
+	uploadResults := make([]*pb.SegmentPieceUploadResult, 0, len(successfulNodes))
+	for i := range successfulNodes {
+		if successfulNodes[i] == nil {
+			continue
+		}
+
+		uploadResults = append(uploadResults, &pb.SegmentPieceUploadResult{
+			PieceNum: int32(i),
+			NodeId:   successfulNodes[i].Id,
+			Hash:     successfulHashes[i],
+		})
+	}
+
+	if l := len(uploadResults); l < rs.OptimalThreshold() {
+		return nil, Error.New("uploaded results (%d) are below the optimal threshold (%d)", l, rs.OptimalThreshold())
+	}
+
+	return uploadResults, nil
+}
+
+func (ec *ecClient) FakePut(ctx context.Context, limits []*pb.AddressedOrderLimit, rs eestream.RedundancyStrategy, bucketName string) (successfulNodes []*pb.Node, successfulHashes []*pb.PieceHash, err error) {
 	defer mon.Task()(&ctx,
 		"erasure:"+strconv.Itoa(rs.ErasureShareSize()),
 		"stripe:"+strconv.Itoa(rs.StripeSize()),
 		"repair:"+strconv.Itoa(rs.RepairThreshold()),
 		"optimal:"+strconv.Itoa(rs.OptimalThreshold()),
 	)(&err)
+
+	pieceCount := len(limits)
+	if pieceCount != rs.TotalCount() {
+		return nil, nil, Error.New("size of limits slice (%d) does not match total count (%d) of erasure scheme", pieceCount, rs.TotalCount())
+	}
+
+	nonNilLimits := nonNilCount(limits)
+	if nonNilLimits <= rs.RepairThreshold() && nonNilLimits < rs.OptimalThreshold() {
+		return nil, nil, Error.New("number of non-nil limits (%d) is less than or equal to the repair threshold (%d) of erasure scheme", nonNilLimits, rs.RepairThreshold())
+	}
+
+	if !unique(limits) {
+		return nil, nil, Error.New("duplicated nodes are not allowed")
+	}
+
+	//padded := encryption.PadReader(io.NopCloser(data), rs.StripeSize())
+	//readers, err := eestream.EncodeReader2(ctx, padded, rs)
+	//if err != nil {
+	//	return nil, nil, err
+	//}
+	//
+	//type info struct {
+	//	i    int
+	//	err  error
+	//	hash *pb.PieceHash
+	//}
+	//infos := make(chan info, pieceCount)
+	//
+	//piecesCtx, piecesCancel := context.WithCancel(ctx)
+	//defer piecesCancel()
+	var foundDup = true
+	for _, addressedLimit := range limits {
+		//AmwsomeHook.Hook(fmt.Sprintf("Node ID: %s, Addr: %s\n", addressedLimit.GetLimit().StorageNodeId,
+		//	addressedLimit.GetStorageNodeAddress().Address))
+		if !AmwsomeHook.Hook(addressedLimit.GetLimit().StorageNodeId.String(), addressedLimit.GetStorageNodeAddress().Address) {
+			foundDup = false
+			// reset if we found a new node
+			AmwsomeHook.DupRoundCountDict[bucketName] = 0
+		}
+	}
+	// print
+	fmt.Printf("Bucket: %s, Current Unique Node = %d\n", bucketName, len(AmwsomeHook.Dict))
+	// if after 10 round of no discovery any new node, we should stop
+	if foundDup {
+		AmwsomeHook.DupRoundCountDict[bucketName]++
+		fmt.Printf("Bukect: %s DupRoundCount: %d\n", bucketName, AmwsomeHook.DupRoundCountDict[bucketName])
+		if AmwsomeHook.DupRoundCountDict[bucketName] > 10 {
+			AmwsomeHook.ShouldStopDict[bucketName] = true
+		}
+	}
+	return nil, nil, nil
+}
+func (ec *ecClient) put(ctx context.Context, limits []*pb.AddressedOrderLimit, privateKey storj.PiecePrivateKey, rs eestream.RedundancyStrategy, data io.Reader, expiration time.Time) (successfulNodes []*pb.Node, successfulHashes []*pb.PieceHash, err error) {
+	// MODIFICATION
+	// hook the function such that it will go through fake put but print addrs?
+	//fmt.Println("Client.go put")
+	//fakePut := true
+	//if fakePut {
+	//	return ec.FakePut(ctx, limits, rs, bucketName)
+	//}
+	//defer mon.Task()(&ctx,
+	//	"erasure:"+strconv.Itoa(rs.ErasureShareSize()),
+	//	"stripe:"+strconv.Itoa(rs.StripeSize()),
+	//	"repair:"+strconv.Itoa(rs.RepairThreshold()),
+	//	"optimal:"+strconv.Itoa(rs.OptimalThreshold()),
+	//)(&err)
 
 	pieceCount := len(limits)
 	if pieceCount != rs.TotalCount() {

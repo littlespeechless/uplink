@@ -6,14 +6,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
+	//"storj.io/uplink"
 	"storj.io/uplink"
 	"storj.io/uplink/edge"
+
+	AwesomeHook "storj.io/uplink/hook"
 )
 
 const defaultExpiration = 7 * 24 * time.Hour
@@ -60,27 +68,10 @@ func UploadAndDownloadData(ctx context.Context,
 	}
 
 	// Commit the uploaded object.
+	// this will fail due to modification with fake upload
 	err = upload.Commit()
 	if err != nil {
 		return fmt.Errorf("could not commit uploaded object: %v", err)
-	}
-
-	// Initiate a download of the same object again
-	download, err := project.DownloadObject(ctx, bucketName, uploadKey, nil)
-	if err != nil {
-		return fmt.Errorf("could not open object: %v", err)
-	}
-	defer download.Close()
-
-	// Read everything from the download stream
-	receivedContents, err := io.ReadAll(download)
-	if err != nil {
-		return fmt.Errorf("could not read data: %v", err)
-	}
-
-	// Check that the downloaded data is the same as the uploaded data.
-	if !bytes.Equal(receivedContents, dataToUpload) {
-		return fmt.Errorf("got different object back: %q != %q", dataToUpload, receivedContents)
 	}
 
 	return nil
@@ -129,26 +120,108 @@ func CreatePublicSharedLink(ctx context.Context, accessGrant, bucketName, object
 	return url, nil
 }
 
+func crawl(ctx context.Context, accessGrant *string, bucketName, objectKey string) {
+	// generate random bytes
+	size := 64 * 1024 * 1024 // 64MB
+	data := make([]byte, size)
+	_, err := rand.Read(data)
+	for !AwesomeHook.ShouldStopDict[bucketName] {
+		err = UploadAndDownloadData(ctx, *accessGrant, bucketName, objectKey, data)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+}
 func main() {
-	ctx := context.Background()
-	accessGrant := flag.String("access", os.Getenv("ACCESS_GRANT"), "access grant from satellite")
+	// parse args
+	NAAccessGrant := flag.String("na", os.Getenv("ACCESS_GRANT"), "access grant from satellite")
+	EUAccessGrant := flag.String("eu", os.Getenv("ACCESS_GRANT"), "access grant from satellite")
+	APAccessGrant := flag.String("ap", os.Getenv("ACCESS_GRANT"), "access grant from satellite")
+	outputPath := flag.String("output", "./", "output path for saving the result")
 	flag.Parse()
 
-	bucketName := "my-first-bucket"
+	// create log folder to store all logs
+	saveDir := *outputPath
+	err := os.MkdirAll(saveDir, 0755)
+	if err != nil {
+		panic("Error creating logs folder. Exiting")
+	}
+	// setup log name
+	currentDate := time.Now().Format("2006-01-02_15-04")
+	fmt.Println(currentDate)
+	//os.Exit(0)
+	fileName := fmt.Sprintf("%s.log", currentDate)
+	savePath := filepath.Join(saveDir, fileName)
+	jsonPath := filepath.Join(saveDir, fmt.Sprintf("%s.json", currentDate))
+	// create log file
+	file, err := os.OpenFile(savePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// redirect output
+	log.SetOutput(file)
+
+	ctx := context.Background()
+
+	bukectAccessGrant := make(map[string]*string)
+	bukectAccessGrant["na-bucket"] = NAAccessGrant
+	bukectAccessGrant["eu-bucket"] = EUAccessGrant
+	bukectAccessGrant["ap-bucket"] = APAccessGrant
+
+	AwesomeHook.ShouldStopDict["na-bucket"] = false
+	AwesomeHook.ShouldStopDict["eu-bucket"] = false
+	AwesomeHook.ShouldStopDict["ap-bucket"] = false
+
 	objectKey := "foo/bar/baz"
-
-	err := UploadAndDownloadData(ctx, *accessGrant, bucketName, objectKey, []byte("one fish two fish red fish blue fish"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "upload failed:", err)
-		os.Exit(1)
+	// run crawl in parallel
+	var wg sync.WaitGroup
+	for _, bucketName := range []string{"na-bucket", "eu-bucket", "ap-bucket"} {
+		wg.Add(1)
+		go func(bucketName string) {
+			defer wg.Done()
+			// generate random bytes
+			size := 64 * 1024 * 1024 // 64MB
+			data := make([]byte, size)
+			_, err := rand.Read(data)
+			for !AwesomeHook.ShouldStopDict[bucketName] {
+				err = UploadAndDownloadData(ctx, *bukectAccessGrant[bucketName], bucketName, objectKey, data)
+				if err != nil {
+					//fmt.Println(err)
+				}
+				time.Sleep(1 * time.Second)
+			}
+		}(bucketName)
 	}
+	wg.Wait()
+	//err = UploadAndDownloadData(ctx, *accessGrant, bucketName, objectKey, data)
+	//time.Sleep(1 * time.Second)
+	// save dict to json
 
-	url, err := CreatePublicSharedLink(ctx, *accessGrant, bucketName, objectKey)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "creating public link failed:", err)
-		os.Exit(1)
-	}
+	saveDictToJson(AwesomeHook.Dict, jsonPath)
 
 	fmt.Println("success!")
-	fmt.Println("public link:", url)
+
+}
+
+func saveDictToJson(dict map[string]string, path string) {
+	jsonData, err := json.Marshal(dict)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer file.Close()
+
+	_, err = file.Write(jsonData)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println("JSON data written to ", file.Name())
 }

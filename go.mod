@@ -2,6 +2,8 @@ module storj.io/uplink
 
 go 1.20
 
+
+
 require (
 	github.com/spacemonkeygo/monkit/v3 v3.0.22
 	github.com/stretchr/testify v1.8.4
@@ -15,6 +17,7 @@ require (
 	storj.io/infectious v0.0.2
 	storj.io/picobuf v0.0.3
 )
+
 
 require (
 	github.com/calebcase/tmpfile v1.0.3 // indirect

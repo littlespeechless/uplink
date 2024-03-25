@@ -119,7 +119,7 @@ func (s *Store) Put(ctx context.Context, bucket, unencryptedKey string, data io.
 	if err != nil {
 		return Meta{}, errs.Wrap(err)
 	}
-
+	//fmt.Println("Store.go Stream.Put")
 	beginObjectReq := &metaclient.BeginObjectParams{
 		Bucket:               []byte(bucket),
 		EncryptedObjectKey:   []byte(encPath.Raw()),
@@ -203,7 +203,7 @@ func (s *Store) Put(ctx context.Context, bucket, unencryptedKey string, data io.
 			EncryptedKey:      encryptedKey,
 			EncryptedKeyNonce: encryptedKeyNonce,
 		}
-
+		isRemote = true
 		if isRemote {
 			encrypter, err := encryption.NewEncrypter(s.encryptionParameters.CipherSuite, &contentKey, &contentNonce, int(s.encryptionParameters.BlockSize))
 			if err != nil {
@@ -250,7 +250,7 @@ func (s *Store) Put(ctx context.Context, bucket, unencryptedKey string, data io.
 			segmentRS = segResponse.RedundancyStrategy
 
 			encSizedReader := SizeReader(transformedReader)
-			uploadResults, err := s.ec.PutSingleResult(ctx, limits, piecePrivateKey, segmentRS, encSizedReader)
+			uploadResults, err := s.ec.PutSingleResultFake(ctx, limits, piecePrivateKey, segmentRS, bucket)
 			if err != nil {
 				return Meta{}, errs.Wrap(err)
 			}

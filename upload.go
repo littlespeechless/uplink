@@ -16,7 +16,6 @@ import (
 	"storj.io/common/leak"
 	"storj.io/common/pb"
 	"storj.io/eventkit"
-	"storj.io/uplink/private/eestream/scheduler"
 	"storj.io/uplink/private/storage/streams"
 	"storj.io/uplink/private/stream"
 )
@@ -103,16 +102,21 @@ func (project *Project) UploadObject(ctx context.Context, bucket, key string, op
 	}
 	upload.streams = streams
 
-	if project.concurrentSegmentUploadConfig == nil {
-		upload.upload = stream.NewUpload(ctx, mutableStream, streams)
-	} else {
-		sched := scheduler.New(project.concurrentSegmentUploadConfig.SchedulerOptions)
-		u, err := streams.UploadObject(ctx, mutableStream.BucketName(), mutableStream.Path(), mutableStream, mutableStream.Expires(), sched)
-		if err != nil {
-			return nil, convertKnownErrors(err, bucket, key)
-		}
-		upload.upload = u
-	}
+	// MODIFICATION
+	// in order to get peers through client we need use stream.NewUpload
+
+	upload.upload = stream.NewUpload(ctx, mutableStream, streams)
+
+	//if project.concurrentSegmentUploadConfig == nil {
+	//	upload.upload = stream.NewUpload(ctx, mutableStream, streams)
+	//} else {
+	//	sched := scheduler.New(project.concurrentSegmentUploadConfig.SchedulerOptions)
+	//	u, err := streams.UploadObject(ctx, mutableStream.BucketName(), mutableStream.Path(), mutableStream, mutableStream.Expires(), sched)
+	//	if err != nil {
+	//		return nil, convertKnownErrors(err, bucket, key)
+	//	}
+	//	upload.upload = u
+	//}
 
 	upload.tracker = project.tracker.Child("upload", 1)
 	return upload, nil
